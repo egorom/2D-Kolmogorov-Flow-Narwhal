@@ -68,17 +68,20 @@ f=dist.VectorField(coords, bases=(xbasis, ybasis))
 f['g'][0]=amp * np.sin(nper * y) #x forcing
 f['g'][1]=0
 
-problem=d3.IVP([u,p], namespace=locals())
+#problem=d3.IVP([u,p], namespace=locals())
 lap=d3.Laplacian
 grad=d3.Gradient
 div=d3.Divergence
-dt_op = d3.dt
 
-problem = d3.IVP([u, p], namespace=locals() | {'dt': dt_op})
+
+tau_p=dist.Field()
+tau_u=dist.VectorField(coords)
+problem = d3.LBVP([u, p, tau_p, tau_u], namespace=locals())
 #it interprets the following as an operator equation, discretizes spectrally in x and y and enforces incompressibility as a constraint
-problem.add_equation("dt(u) - nu*lap(u) + grad(p) = f") #time-dependent stokes
-problem.add_equation("div(u)=0")
-#problem.add_equation("integ(p) = 0")
+problem.add_equation("- nu*lap(u) + grad(p) + tau_u = f") #time-dependent stokes
+problem.add_equation("div(u)+tau_p=0")
+problem.add_equation("integ(p) = 0")
+problem.add_equation("integ(u) = 0")
 
 
 #Steady Stokes instead
@@ -86,13 +89,18 @@ problem.add_equation("div(u)=0")
 #problem.add_equation("-nu*lap(u)+grad(p)=f")
 #problem.add_equation("integ(p)=0")
 
-solver=problem.build_solver(d3.RK443) #why this RK?
-solver.stop_sim_time=runtime
+solver=problem.build_solver() #why this RK?
+solver.solve()
 
-u['g'][0] = maxvel * np.sin(nper * y)  # u_x
-u['g'][1] = 0.0  # u_y
+y1d=y[0,:]
+u_slice=u['g'][0,0,:]
+plt.figure()
+plt.plot(y1d, u_slice, label='numerical')
+plt.plot(y1d, (amp/(nu*nper**2))*np.sin(nper*y1d), '--', label='analytical')
+plt.legend()
+plt.xlabel('y')
+plt.ylabel('u_x')
+plt.show()
 
-while solver.proceed:
-    solver.step(timestep)
-
-    p['g']-=np.mean(p['g'])
+div_u=div(u).evaluate()['g']
+print("max div(u)=", np.max(np.abs(div_u)))
