@@ -64,21 +64,29 @@ div=d3.Divergence
 
 tau_p=dist.Field()
 tau_u=dist.VectorField(coords)
-problem = d3.LBVP([u, p, tau_p, tau_u], namespace=locals())
+problem = d3.IVP([u, p, tau_p, tau_u], namespace=locals())
 #it interprets the following as an operator equation, discretizes spectrally in x and y and enforces incompressibility as a constraint
-problem.add_equation("- nu*lap(u) + grad(p) + tau_u = f") #time-dependent stokes
+problem.add_equation("dt(u)+grad(p)- nu*lap(u) + tau_u = f-u@grad(u)") #time-dependent stokes
 problem.add_equation("div(u)+tau_p=0")
 problem.add_equation("integ(p) = 0")
 problem.add_equation("integ(u) = 0")
 
 
-#Steady Stokes instead
-#problem=d3.LBVP([u,p], namespace=locals())
-#problem.add_equation("-nu*lap(u)+grad(p)=f")
-#problem.add_equation("integ(p)=0")
 
-solver=problem.build_solver() #why this RK?
-solver.solve()
+solver=problem.build_solver(d3.RK443) #why this RK?
+u['g'][0] = 0
+u['g'][1] = 0
+
+
+solver.stop_sim_time=runtime
+solver.stop_wall_time=np.inf
+solver.stop_iteration=np.inf
+
+while solver.proceed:
+    solver.step(timestep)
+    if solver.iteration % 50==0:
+        div_u=div(u).evaluate()['g']
+        print(f"t={solver.sim_time:.3f}, max div(u)={np.max(np.abs(div_u)):.2e}")
 
 y1d=y[0,:]
 u_slice=u['g'][0,0,:]
