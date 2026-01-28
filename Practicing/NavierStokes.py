@@ -7,9 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import dedalus.public as d3
 
-#matplotlib inline
-#config InlineBackend.figure_format='retina'
-
 #provide the names to use for each coordinate
 coords=d3.CartesianCoordinates('x','y')
 
@@ -65,7 +62,7 @@ div=d3.Divergence
 tau_p=dist.Field()
 tau_u=dist.VectorField(coords)
 problem = d3.IVP([u, p, tau_p, tau_u], namespace=locals())
-#it interprets the following as an operator equation, discretizes spectrally in x and y and enforces incompressibility as a constraint
+
 problem.add_equation("dt(u)+grad(p)- nu*lap(u) + tau_u = f-u@grad(u)") #time-dependent stokes
 problem.add_equation("div(u)+tau_p=0")
 problem.add_equation("integ(p) = 0")
