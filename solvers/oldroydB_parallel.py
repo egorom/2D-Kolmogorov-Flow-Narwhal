@@ -17,18 +17,20 @@ dealias = 3/2
 n_kolm=1 #wavenumber of Kolmogorov forcing
 F_kolm=4.0 #forcing amplitude
 U_lam=F_kolm/(beta*n_kolm**2) #laminar base flow
+rng=np.random.default_rng(seed=42)
+noise=rng.standard_normal((Nx,Ny)) if dist.comm.rank == else None
 ########
 
 
 ########
 # Linear conformation stepping-stone params
 kappa_c = 0     # diffusion on C components
-tauR    = 2       # relaxation time (C -> I) #########
+tauR    = 2.0      # relaxation time (C -> I) #########
 dt_step = .00125 #5e-4   # small enough for Nx=1024 i used: grid.dt = (.01/(2^(log2(grid.Nx)-6)));  
-t_end   = max(2,10*tauR)
+t_end   = 30.0
 
 # Coupling strength for polymer stress in Stokes forcing:
-alpha_p = .5/tauR   # 
+alpha_p = 2.0   # 
 ###########
 
 comm = MPI.COMM_WORLD
@@ -110,9 +112,9 @@ cyy = dist.Field(name='cyy', bases=(xb, yb))
 
 # Initial condition: identity + blob
 blob = np.exp(-((x-np.pi)**2 + (y-np.pi/2)**2)/(0.3**2))
-cxx['g'] = 1.0 + 0.05*np.cos(y)
-cxy['g'] = 0.05*np.sin(2*x)*np.sin(y)
-cyy['g'] = 1.0+.05*np.cos(x)+np.sin(y)
+cxx['g'] = 1.0 + 0.2*np.sin(x)*np.cos(2*y)
+cxy['g'] = 0.2*np.sin(2*x)*np.sin(y)+0.1*np.cos(x)
+cyy['g'] = 1.0+.2*np.cos(x)+np.sin(2*y)
 
 # -------------------------
 # Stokes LBVP
