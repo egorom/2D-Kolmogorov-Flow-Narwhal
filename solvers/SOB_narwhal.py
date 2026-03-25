@@ -5,47 +5,87 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+import time
+import sys
+import os
+import subprocess
+import shutil
+
+# -------------------------
+# Run options
+# -------------------------
+PARALLEL         = True    # Set True to relaunch under mpiexec -n N_PROCS if not already parallel
+N_PROCS          = 4       # Number of MPI ranks to use when PARALLEL=True
+TIME_SCALING     = False   # Set True to run timing checkpoints instead of full simulation
+TIME_CHECKPOINTS = [10.0, 20.0]
+
+# -------------------------
+# Self-relaunch under mpiexec if PARALLEL=True and we're only on 1 rank
+# -------------------------
+if PARALLEL and MPI.COMM_WORLD.Get_size() == 1:
+    mpiexec = shutil.which("mpiexec") or shutil.which("mpirun")
+    if mpiexec is None:
+        py_bin = os.path.dirname(sys.executable)
+        for candidate in ["mpiexec", "mpirun"]:
+            full = os.path.join(py_bin, candidate)
+            if os.path.isfile(full) and os.access(full, os.X_OK):
+                mpiexec = full
+                break
+    if mpiexec is None:
+        print("ERROR: could not find mpiexec or mpirun. "
+              "Try: conda install -c conda-forge openmpi")
+        sys.exit(1)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = "1"
+    cmd = [mpiexec, "-n", str(N_PROCS), sys.executable] + sys.argv
+    print(f"Relaunching with: {' '.join(cmd)}")
+    result = subprocess.run(cmd, env=env)
+    sys.exit(result.returncode)
+
+# If we get here, we're either already running under mpiexec, or PARALLEL=False
+comm = MPI.COMM_WORLD
+if comm.rank == 0:
+    print(f"Running on {comm.size} rank(s)  |  "
+          f"{'PARALLEL' if comm.size > 1 else 'SERIAL'}  |  "
+          f"{'TIMING MODE' if TIME_SCALING else 'SIMULATION MODE'}")
 
 # -------------------------
 # Parameters
 # -------------------------
 aspect  = 4
 Lx      = 2*np.pi
-Ly      = Lx / aspect           # pi/2
+Ly      = Lx / aspect
 Nx      = 128
-Ny      = Nx // aspect          # 32
+Ny      = Nx // aspect
 dealias = 3/2
 
 n_kolm  = 4
-nu      = 0.0005
-lam     = 1.695                 
+lam     = 1.695
 xi      = 0.5
 maxvel  = 4.0
-beta    = nu
 
-kappa_c = 1e-3  # polymer diffusion coefficient (small but nonzero for numerical stability)  
+kappa_c = 1e-3
 tauR    = lam
-alpha_p = xi * nu / lam
+alpha_p = xi / lam
 
-amp     = nu * maxvel * n_kolm**2 * (1 + xi / (1 + lam*nu*n_kolm**2))
+amp     = maxvel * n_kolm**2 * (1 + xi / (1 + lam*n_kolm**2))
 
-dt_step = 0.005                 # matches MATLAB dt for Nx=128
-t_end   = 40.0
-plot_interval = 1.0             # save a 2D snapshot every 1 time unit
+dt_step = 0.005
+t_end   = 80.0
+plot_interval = 2.0
 
-comm    = MPI.COMM_WORLD
-Wi      = lam * maxvel * n_kolm
+Wi = lam * maxvel * n_kolm
 
 # -------------------------
-# Analytical laminar solution (used only as IC — system will depart from it)
+# Analytical laminar solution
 # -------------------------
 def analytical_solution(y_arr):
     ux_sol   = maxvel * np.sin(n_kolm * y_arr)
-    denom    = 1/lam**2 + 5*nu*n_kolm**2/lam + 4*nu**2*n_kolm**4
+    denom    = 1/lam**2 + 5*n_kolm**2/lam + 4**2*n_kolm**4
     C11amp   = 2*maxvel**2*n_kolm**2 / denom
-    C11const = 2*lam*nu*C11amp*n_kolm**2 + 1.0
+    C11const = 2*lam*C11amp*n_kolm**2 + 1.0
     C11_sol  = C11amp * np.cos(n_kolm * y_arr)**2 + C11const
-    C12_sol  = (maxvel*n_kolm*lam) / (1 + lam*nu*n_kolm**2) * np.cos(n_kolm * y_arr)
+    C12_sol  = (maxvel*n_kolm*lam) / (1 + lam*n_kolm**2) * np.cos(n_kolm * y_arr)
     C22_sol  = np.ones_like(y_arr)
     return ux_sol, C11_sol, C12_sol, C22_sol
 
@@ -89,7 +129,7 @@ f_total['g'][0] = f0['g'][0]
 f_total['g'][1] = f0['g'][1]
 
 # -------------------------
-# Conformation tensor — IC = analytical laminar solution
+# Conformation tensor IC
 # -------------------------
 cxx = dist.Field(name='cxx', bases=(xb, yb))
 cxy = dist.Field(name='cxy', bases=(xb, yb))
@@ -97,22 +137,22 @@ cyy = dist.Field(name='cyy', bases=(xb, yb))
 
 _, C11_init, C12_init, _ = analytical_solution(y)
 
+rng      = np.random.default_rng(seed=42)
+C11max   = np.max(C11_init)
+pert_amp = 1e-3 * C11max
 
-rng   = np.random.default_rng(seed=42)
-C11max = np.max(C11_init)
-pert_amp = 1e-3 * C11max  # 0.1% of peak C11 — small enough to avoid immediate blowup
-
-
-X = x * np.ones((1, Ny))   # (Nx, Ny)
-Y = y * np.ones((Nx, 1))   # (Nx, Ny)
-pert = np.zeros((Nx, Ny))
+# Use local grid shapes so this works correctly under MPI decomposition
+local_Nx, local_Ny = x.shape[0], y.shape[1]
+X = x * np.ones((1, local_Ny))
+Y = y * np.ones((local_Nx, 1))
+pert = np.zeros((local_Nx, local_Ny))
 for kx_p in range(1, 5):
     for ky_p in range(1, 5):
         phase = rng.uniform(0, 2*np.pi)
         pert += np.sin(kx_p * X + phase) * np.cos(ky_p * Y)
-pert = pert_amp * pert / np.max(np.abs(pert))   # normalise to pert_amp
+pert = pert_amp * pert / np.max(np.abs(pert))
 
-cxx['g'] = C11_init + pert   # perturb C11 only
+cxx['g'] = C11_init + pert
 cxy['g'] = C12_init
 cyy['g'] = 1.0
 
@@ -120,7 +160,7 @@ cyy['g'] = 1.0
 # Stokes LBVP
 # -------------------------
 stokes = d3.LBVP([u, p, ux0, uy0, p0], namespace=locals())
-stokes.add_equation("beta*d3.div(d3.grad(u)) - d3.grad(p) + ux0*ex + uy0*ey = -f_total")
+stokes.add_equation("d3.div(d3.grad(u)) - d3.grad(p) + ux0*ex + uy0*ey = -f_total")
 stokes.add_equation("d3.div(u) + p0 = 0")
 stokes.add_equation("d3.integ(p) = 0")
 stokes.add_equation("d3.integ(u@ex) = 0")
@@ -129,7 +169,7 @@ stokes_solver = stokes.build_solver()
 stokes_solver.solve()
 
 # -------------------------
-# Conformation IVP: upper-convected Oldroyd-B
+# Conformation IVP
 # -------------------------
 cprob = d3.IVP([cxx, cxy, cyy], namespace=locals())
 
@@ -150,14 +190,15 @@ csolver = cprob.build_solver(d3.RK443)
 csolver.stop_sim_time = t_end
 
 # -------------------------
-# Dedalus snapshot handler
+# Snapshot handler (suppressed in timing mode)
 # -------------------------
-snap = csolver.evaluator.add_file_handler("snapshots", sim_dt=0.5, max_writes=None)
-snap.add_task(u @ ex, name="ux")
-snap.add_task(u @ ey, name="uy")
-snap.add_task(cxx,    name="cxx")
-snap.add_task(cxy,    name="cxy")
-snap.add_task(cyy,    name="cyy")
+if not TIME_SCALING:
+    snap = csolver.evaluator.add_file_handler("snapshots", sim_dt=0.5, max_writes=None)
+    snap.add_task(u @ ex, name="ux")
+    snap.add_task(u @ ey, name="uy")
+    snap.add_task(cxx,    name="cxx")
+    snap.add_task(cxy,    name="cxy")
+    snap.add_task(cyy,    name="cyy")
 
 # -------------------------
 # Polymer stress update
@@ -177,26 +218,34 @@ def update_forcing_from_C():
     f_total['g'][1] = f0['g'][1] + divtau_y['g']
 
 # -------------------------
-# 2D snapshot plot — the Narwhal plot
+# 2D snapshot plot — MPI-safe gather before plotting
 # -------------------------
 def save_2d_plot(t_now):
-    if comm.rank != 0:
-        return
-
+    # All ranks must participate in the gather — this is a collective call
     u.change_scales(1)
     cxx.change_scales(1);  cxy.change_scales(1);  cyy.change_scales(1)
 
-    # Gather full 2D fields (shape: Nx x Ny)
-    ux_g   = u['g'][0]
-    uy_g   = u['g'][1]
-    cxx_g  = cxx['g']
-    cxy_g  = cxy['g']
-    cyy_g  = cyy['g']
-    trC_g  = cxx_g + cyy_g
+    ux_gathered  = comm.gather(u['g'][0],  root=0)
+    uy_gathered  = comm.gather(u['g'][1],  root=0)
+    cxx_gathered = comm.gather(cxx['g'],   root=0)
+    cxy_gathered = comm.gather(cxy['g'],   root=0)
+    cyy_gathered = comm.gather(cyy['g'],   root=0)
 
-    # Global x/y arrays for plotting (local grids are full since serial)
-    X = x[:, 0]   # shape (Nx,)
-    Y = y[0, :]   # shape (Ny,)
+    # Only rank 0 does the plotting
+    if comm.rank != 0:
+        return
+
+    # Reassemble full fields along y-axis
+    ux_g  = np.concatenate(ux_gathered,  axis=1)
+    uy_g  = np.concatenate(uy_gathered,  axis=1)
+    cxx_g = np.concatenate(cxx_gathered, axis=1)
+    cxy_g = np.concatenate(cxy_gathered, axis=1)
+    cyy_g = np.concatenate(cyy_gathered, axis=1)
+    trC_g = cxx_g + cyy_g
+
+    # Full global axes for plotting
+    x_plot = np.linspace(0, Lx, Nx, endpoint=False)
+    y_plot = np.linspace(0, Ly, Ny, endpoint=False)
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 7))
     fig.suptitle(
@@ -205,9 +254,6 @@ def save_2d_plot(t_now):
         fontsize=14
     )
 
-    # Subtract x-average (mean over x at each y) from every field.
-    # This removes the y-uniform background — whatever it currently is —
-    # and reveals only the x-varying Narwhal anomaly, consistently for all fields.
     def xanom(f):
         return f - np.mean(f, axis=0, keepdims=True)
 
@@ -219,7 +265,7 @@ def save_2d_plot(t_now):
         else:
             vmin, vmax = data.min(), data.max()
             norm = None
-        im = ax.pcolormesh(X, Y, data.T, cmap=cmap, norm=norm,
+        im = ax.pcolormesh(x_plot, y_plot, data.T, cmap=cmap, norm=norm,
                            vmin=None if diverging else vmin,
                            vmax=None if diverging else vmax,
                            shading='auto')
@@ -228,12 +274,12 @@ def save_2d_plot(t_now):
         ax.set_aspect('equal')
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    pcolor(axes[0, 0], xanom(ux_g),  "$u_x' $",          cmap='RdBu_r', diverging=True)
-    pcolor(axes[0, 1], uy_g,         '$u_y$',             cmap='RdBu_r', diverging=True)
-    pcolor(axes[0, 2], xanom(trC_g), "Tr$(C)'$",          cmap='RdBu_r', diverging=True)
-    pcolor(axes[1, 0], xanom(cxx_g), "$C_{11}'$",         cmap='RdBu_r', diverging=True)
-    pcolor(axes[1, 1], xanom(cxy_g), "$C_{12}'$",         cmap='RdBu_r', diverging=True)
-    pcolor(axes[1, 2], xanom(cyy_g), "$C_{22}'$",         cmap='RdBu_r', diverging=True)
+    pcolor(axes[0, 0], xanom(ux_g),  "$u_x'$",   cmap='RdBu_r', diverging=True)
+    pcolor(axes[0, 1], uy_g,         '$u_y$',     cmap='RdBu_r', diverging=True)
+    pcolor(axes[0, 2], xanom(trC_g), "Tr$(C)'$",  cmap='RdBu_r', diverging=True)
+    pcolor(axes[1, 0], xanom(cxx_g), "$C_{11}'$", cmap='RdBu_r', diverging=True)
+    pcolor(axes[1, 1], xanom(cxy_g), "$C_{12}'$", cmap='RdBu_r', diverging=True)
+    pcolor(axes[1, 2], xanom(cyy_g), "$C_{22}'$", cmap='RdBu_r', diverging=True)
 
     plt.tight_layout()
     fname = f"narwhal_t{t_now:05.2f}.png"
@@ -244,35 +290,79 @@ def save_2d_plot(t_now):
 # -------------------------
 # Time loop
 # -------------------------
-t   = 0.0
-it  = 0
+t  = 0.0
+it = 0
 
-save_2d_plot(t)   # t=0 snapshot
+if TIME_SCALING:
+    # --- Timing mode ---
+    timing_results = {}
+    checkpoint_idx = 0
+    wall_start     = time.perf_counter()
 
-next_plot = plot_interval
+    if comm.rank == 0:
+        print(f"\n=== Timing mode: checkpoints at {TIME_CHECKPOINTS} ===\n")
 
-while t < t_end - 1e-14:
+    while t < t_end - 1e-14:
+        update_forcing_from_C()
+        stokes_solver.solve()
+        csolver.step(dt_step)
+        t  += dt_step
+        it += 1
 
-    update_forcing_from_C()
-    stokes_solver.solve()
-    csolver.step(dt_step)
-    t  += dt_step
-    it += 1
+        # Heartbeat every 200 steps so you know it's running
+        if it % 200 == 0 and comm.rank == 0:
+            elapsed = time.perf_counter() - wall_start
+            print(f"  t={t:.2f}  elapsed={elapsed:.1f}s  ({elapsed/it*1000:.2f} ms/step)")
 
-    # Console print every 200 steps
-    if it % 200 == 0 and comm.rank == 0:
-        cxx.change_scales(1);  cyy.change_scales(1)
-        tr_max = np.max(cxx['g'] + cyy['g'])
-        spd_ok = "OK" if tr_max > 0 else "⚠ SPD"
-        print(f"t={t:.3f}  max(TrC)={tr_max:.3e}  [{spd_ok}]")
+        if checkpoint_idx < len(TIME_CHECKPOINTS) and t >= TIME_CHECKPOINTS[checkpoint_idx] - 1e-10:
+            elapsed = time.perf_counter() - wall_start
+            timing_results[TIME_CHECKPOINTS[checkpoint_idx]] = elapsed
+            if comm.rank == 0:
+                print(f"  Checkpoint t={TIME_CHECKPOINTS[checkpoint_idx]:.1f}: "
+                      f"{elapsed:.2f}s  ({elapsed/60:.2f} min)  "
+                      f"[{it} steps,  {elapsed/it*1000:.3f} ms/step]")
+            checkpoint_idx += 1
 
-    # 2D plot every plot_interval time units
-    if t >= next_plot - 1e-10:
-        save_2d_plot(t)
-        next_plot += plot_interval
+        if checkpoint_idx >= len(TIME_CHECKPOINTS):
+            break
 
-# Final snapshot
-save_2d_plot(t)
+    if comm.rank == 0 and len(timing_results) >= 2:
+        chk = TIME_CHECKPOINTS
+        t1, t2   = chk[0], chk[1]
+        w1, w2   = timing_results[t1], timing_results[t2]
+        expected = t2 / t1
+        actual   = w2 / w1
+        print(f"\n=== Scaling summary ===")
+        print(f"  t=0 → {t1:.1f}:  {w1:.2f}s")
+        print(f"  t=0 → {t2:.1f}:  {w2:.2f}s")
+        print(f"  Expected ratio (linear): {expected:.2f}x")
+        print(f"  Actual ratio:            {actual:.3f}x")
+        verdict = "✓ linear" if abs(actual - expected) < 0.05 * expected else "⚠ drifting"
+        print(f"  {verdict}")
 
-if comm.rank == 0:
-    print(f"\n=== Done  t={t:.3f} ===")
+else:
+    # --- Normal simulation mode ---
+    save_2d_plot(t)
+    next_plot = plot_interval
+
+    while t < t_end - 1e-14:
+        update_forcing_from_C()
+        stokes_solver.solve()
+        csolver.step(dt_step)
+        t  += dt_step
+        it += 1
+
+        if it % 200 == 0 and comm.rank == 0:
+            cxx.change_scales(1);  cyy.change_scales(1)
+            tr_max = np.max(cxx['g'] + cyy['g'])
+            spd_ok = "OK" if tr_max > 0 else "⚠ SPD"
+            print(f"t={t:.3f}  max(TrC)={tr_max:.3e}  [{spd_ok}]")
+
+        if t >= next_plot - 1e-10:
+            save_2d_plot(t)
+            next_plot += plot_interval
+
+    save_2d_plot(t)
+
+    if comm.rank == 0:
+        print(f"\n=== Done  t={t:.3f} ===")
